@@ -1,7 +1,9 @@
 import os
+import time
 import streamlit as st
 import pandas as pd
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -12,21 +14,12 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1f4e79;
-        margin-bottom: 0.2rem;
-    }
-    .sub-header {
-        font-size: 1rem;
-        color: #555;
-        margin-bottom: 2rem;
-    }
+    .main-header { font-size:2.2rem; font-weight:700; color:#1f4e79; margin-bottom:0.2rem; }
+    .sub-header  { font-size:1rem; color:#555; margin-bottom:2rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Databricks SDK — auto-authenticates via DATABRICKS_CLIENT_ID/SECRET ───────
+# ── Config ────────────────────────────────────────────────────────────────────
 WAREHOUSE_ID = "11ce2a291fc6dc25"
 GOLD_TABLE   = "rankrangers_project_data.gold.mhcet_cutoffs"
 
@@ -34,33 +27,53 @@ GOLD_TABLE   = "rankrangers_project_data.gold.mhcet_cutoffs"
 def get_client():
     return WorkspaceClient()
 
-def run_query(sql: str) -> pd.DataFrame:
-    """Execute SQL via Statement Execution API (auto-starts warehouse)."""
-    w      = get_client()
-    result = w.statement_execution.execute_statement(
-        statement    = sql,
-        warehouse_id = WAREHOUSE_ID,
-        wait_timeout = "30s"
-    )
-    if result.result is None or result.result.data_array is None:
-        return pd.DataFrame()
-    cols = [col.name for col in result.manifest.schema.columns]
-    return pd.DataFrame(result.result.data_array, columns=cols)
+def run_query(sql_text: str) -> pd.DataFrame:
+    """Run SQL via Statement Execution API with polling (handles cold warehouse start)."""
+    w = get_client()
 
-@st.cache_data(ttl=3600)
+    # Submit statement
+    stmt = w.statement_execution.execute_statement(
+        statement    = sql_text,
+        warehouse_id = WAREHOUSE_ID,
+        wait_timeout = "50s",
+        on_wait_timeout = "CONTINUE"
+    )
+
+    # Poll until done (warehouse may need time to start)
+    max_wait = 180  # seconds
+    waited   = 0
+    while stmt.status.state in (StatementState.PENDING, StatementState.RUNNING):
+        if waited >= max_wait:
+            st.error("Query timed out — warehouse taking too long to start.")
+            return pd.DataFrame()
+        time.sleep(3)
+        waited += 3
+        stmt = w.statement_execution.get_statement(stmt.statement_id)
+
+    # Check for errors
+    if stmt.status.state != StatementState.SUCCEEDED:
+        st.error(f"Query failed: {stmt.status.error}")
+        return pd.DataFrame()
+
+    if stmt.result is None or stmt.result.data_array is None:
+        return pd.DataFrame()
+
+    cols = [col.name for col in stmt.manifest.schema.columns]
+    return pd.DataFrame(stmt.result.data_array, columns=cols)
+
+@st.cache_data(ttl=3600, show_spinner="Loading branches...")
 def get_branches():
     df = run_query(f"SELECT DISTINCT branch_name FROM {GOLD_TABLE} ORDER BY branch_name")
     return df["branch_name"].tolist() if not df.empty else []
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner="Loading categories...")
 def get_categories():
     df = run_query(f"SELECT DISTINCT clean_category FROM {GOLD_TABLE} ORDER BY clean_category")
     return df["clean_category"].tolist() if not df.empty else []
 
 def query_colleges(branch, category, gender, score):
-    # Use parametrised-style quoting to avoid injection
-    branch_esc   = branch.replace("'", "''")
-    category_esc = category.replace("'", "''")
+    b = branch.replace("'", "''")
+    c = category.replace("'", "''")
     sql = f"""
         SELECT
             institute_name,
@@ -78,9 +91,9 @@ def query_colleges(branch, category, gender, score):
             total_seats_filled
         FROM {GOLD_TABLE}
         WHERE
-            clean_category = '{category_esc}'
+            clean_category = '{c}'
             AND seat_gender IN ('{gender}', 'ANY')
-            AND branch_name  = '{branch_esc}'
+            AND branch_name  = '{b}'
             AND cap4_cutoff <= {score}
         ORDER BY cap1_cutoff DESC NULLS LAST
     """
@@ -95,14 +108,21 @@ col1, col2, col3, col4 = st.columns([3, 2, 1.5, 1.5])
 
 with col1:
     branches = get_branches()
-    branch   = st.selectbox(
+    if not branches:
+        st.error("Could not load branches — check warehouse status.")
+        st.stop()
+    branch = st.selectbox(
         "Branch", branches,
         index=branches.index("Computer Science and Engineering")
                if "Computer Science and Engineering" in branches else 0
     )
+
 with col2:
     categories = get_categories()
-    category   = st.selectbox("Category", categories)
+    if not categories:
+        st.error("Could not load categories.")
+        st.stop()
+    category = st.selectbox("Category", categories)
 
 with col3:
     gender_label = st.radio("Gender", ["Male", "Female"], horizontal=True)
@@ -119,7 +139,7 @@ search = st.button("🔍 Find Colleges", type="primary", use_container_width=Tru
 
 # ── Results ───────────────────────────────────────────────────────────────────
 if search:
-    with st.spinner("Searching..."):
+    with st.spinner("Querying..."):
         df = query_colleges(branch, category, gender, score)
 
     if df.empty:
@@ -134,10 +154,10 @@ if search:
         st.markdown("---")
 
         ROUND_EMOJI = {
-            "CAP-I":   "🟢 CAP-I",
-            "CAP-II":  "🟡 CAP-II",
-            "CAP-III": "🟠 CAP-III",
-            "CAP-IV":  "🔴 CAP-IV",
+            "CAP-I":    "🟢 CAP-I",
+            "CAP-II":   "🟡 CAP-II",
+            "CAP-III":  "🟠 CAP-III",
+            "CAP-IV":   "🔴 CAP-IV",
             "Unlikely": "⚫ Unlikely"
         }
 
