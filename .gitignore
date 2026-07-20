@@ -24,3 +24,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+# Streamlit secrets
+streamlit_app/.streamlit/secrets.toml
