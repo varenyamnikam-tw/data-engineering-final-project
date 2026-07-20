@@ -214,6 +214,35 @@ df.write.format('delta').mode('append') \
 735,136 raw rows the v2 Silver notebook's own markdown cites; re-point Silver
 at it and confirm Silver's row counts (~633K) are unchanged.
 
+**Status: ✅ implemented, verified locally, needs Databricks confirmation.**
+- Built `bronze_delta_ingest.ipynb` and made the one-line source swap in
+  `bronze_to_silver_v2.ipynb` Cells 2 & 4 (points at
+  `rankrangers_project_data.bronze.mhcet_allotments_raw` now, keeps
+  `CSV_ROOT` commented for rollback).
+- **Verified locally end-to-end** against the real local CSV data
+  (venv Spark 4.0.4 + Delta 4.0.1, using flattened 2-level table names since
+  there's no real Unity Catalog locally): raw Bronze load = exactly
+  **735,136 rows / 1,480 files** (matches the Silver notebook's own cited
+  baseline exactly); Silver output = **633,641 rows**, with
+  `branch_name` nulls at exactly **8,986 (1.42%)** — matches the README's
+  documented "3 women's colleges excluded" limitation precisely. Re-running
+  the overwrite twice produced no duplication (idempotent).
+- **Found and fixed a real, pre-existing bug** while verifying: Silver
+  Cell 8's DQ-report loop did `F.col(col) == ''` generically across
+  `key_cols`, including numeric columns (`mhtcet_score`, `cap_round_num`).
+  Comparing a DOUBLE/INT column to an empty string errors under **ANSI SQL
+  mode** (`CAST_INVALID_INPUT`) — this is Spark 4.x's default and may or may
+  not be Databricks' current default on DBR 17.3 (untested), but it's a
+  latent portability bug regardless. Fixed by only applying the `== ''`
+  check to string-typed columns (numeric columns just use `isNull()`,
+  since they can't hold `''` anyway). Same output either way — this is a
+  robustness fix, not a behavior change.
+- **New finding, not in the README's Known Limitations table:** `seat_type`
+  is null on **26,368 rows (4.16%)** of Silver — a real, currently-existing
+  gap in the deployed table, surfaced by actually running the DQ loop
+  end-to-end. Worth a first-class rule in Phase 3's `dq_metrics` table, and
+  worth mentioning to the team since it's undocumented today.
+
 ---
 
 ## Phase 3 — Formal Data Quality Framework
