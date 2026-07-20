@@ -1,7 +1,7 @@
 import os
 import streamlit as st
 import pandas as pd
-from databricks import sql
+from databricks.sdk import WorkspaceClient
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -10,7 +10,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# ── Styling ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .main-header {
@@ -27,44 +26,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Databricks connection (auto-auth via Databricks Apps env vars) ────────────
+# ── Databricks SDK — auto-authenticates via DATABRICKS_CLIENT_ID/SECRET ───────
+WAREHOUSE_ID = "11ce2a291fc6dc25"
+GOLD_TABLE   = "rankrangers_project_data.gold.mhcet_cutoffs"
+
 @st.cache_resource
-def get_connection():
-    host  = os.environ.get("DATABRICKS_HOST", "").replace("https://", "")
-    token = os.environ.get("DATABRICKS_TOKEN", "")
-    return sql.connect(
-        server_hostname = host,
-        http_path       = "/sql/protocolv1/o/2464733314746848/0426-134721-vfee0nbj",
-        access_token    = token
+def get_client():
+    return WorkspaceClient()
+
+def run_query(sql: str) -> pd.DataFrame:
+    """Execute SQL via Statement Execution API (auto-starts warehouse)."""
+    w      = get_client()
+    result = w.statement_execution.execute_statement(
+        statement    = sql,
+        warehouse_id = WAREHOUSE_ID,
+        wait_timeout = "30s"
     )
+    if result.result is None or result.result.data_array is None:
+        return pd.DataFrame()
+    cols = [col.name for col in result.manifest.schema.columns]
+    return pd.DataFrame(result.result.data_array, columns=cols)
 
 @st.cache_data(ttl=3600)
 def get_branches():
-    conn   = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT branch_name "
-        "FROM rankrangers_project_data.gold.mhcet_cutoffs "
-        "ORDER BY branch_name"
-    )
-    return [row[0] for row in cursor.fetchall()]
+    df = run_query(f"SELECT DISTINCT branch_name FROM {GOLD_TABLE} ORDER BY branch_name")
+    return df["branch_name"].tolist() if not df.empty else []
 
 @st.cache_data(ttl=3600)
 def get_categories():
-    conn   = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT clean_category "
-        "FROM rankrangers_project_data.gold.mhcet_cutoffs "
-        "ORDER BY clean_category"
-    )
-    return [row[0] for row in cursor.fetchall()]
+    df = run_query(f"SELECT DISTINCT clean_category FROM {GOLD_TABLE} ORDER BY clean_category")
+    return df["clean_category"].tolist() if not df.empty else []
 
 def query_colleges(branch, category, gender, score):
-    conn   = get_connection()
-    cursor = conn.cursor()
-    # Sanitise inputs — no user-supplied strings in SQL
-    cursor.execute("""
+    # Use parametrised-style quoting to avoid injection
+    branch_esc   = branch.replace("'", "''")
+    category_esc = category.replace("'", "''")
+    sql = f"""
         SELECT
             institute_name,
             ROUND(cap1_cutoff, 2) AS cap1_cutoff,
@@ -72,41 +69,37 @@ def query_colleges(branch, category, gender, score):
             ROUND(cap3_cutoff, 2) AS cap3_cutoff,
             ROUND(cap4_cutoff, 2) AS cap4_cutoff,
             CASE
-                WHEN cap1_cutoff <= ? THEN 'CAP-I'
-                WHEN cap2_cutoff <= ? THEN 'CAP-II'
-                WHEN cap3_cutoff <= ? THEN 'CAP-III'
-                WHEN cap4_cutoff <= ? THEN 'CAP-IV'
+                WHEN cap1_cutoff <= {score} THEN 'CAP-I'
+                WHEN cap2_cutoff <= {score} THEN 'CAP-II'
+                WHEN cap3_cutoff <= {score} THEN 'CAP-III'
+                WHEN cap4_cutoff <= {score} THEN 'CAP-IV'
                 ELSE 'Unlikely'
             END AS likely_round,
             total_seats_filled
-        FROM rankrangers_project_data.gold.mhcet_cutoffs
+        FROM {GOLD_TABLE}
         WHERE
-            clean_category = ?
-            AND seat_gender IN (?, 'ANY')
-            AND branch_name  = ?
-            AND cap4_cutoff <= ?
-        ORDER BY cap1_cutoff DESC
-    """, [score, score, score, score, category, gender, branch, score])
-    rows    = cursor.fetchall()
-    columns = [desc[0] for desc in cursor.description]
-    return pd.DataFrame(rows, columns=columns)
+            clean_category = '{category_esc}'
+            AND seat_gender IN ('{gender}', 'ANY')
+            AND branch_name  = '{branch_esc}'
+            AND cap4_cutoff <= {score}
+        ORDER BY cap1_cutoff DESC NULLS LAST
+    """
+    return run_query(sql)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-header">🎓 MH-CET 2025 College Predictor</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Find colleges within your reach based on your CET score, category and branch</div>', unsafe_allow_html=True)
 
-# ── Input Panel ───────────────────────────────────────────────────────────────
+# ── Inputs ────────────────────────────────────────────────────────────────────
 col1, col2, col3, col4 = st.columns([3, 2, 1.5, 1.5])
 
 with col1:
     branches = get_branches()
     branch   = st.selectbox(
-        "Branch",
-        branches,
+        "Branch", branches,
         index=branches.index("Computer Science and Engineering")
                if "Computer Science and Engineering" in branches else 0
     )
-
 with col2:
     categories = get_categories()
     category   = st.selectbox("Category", categories)
@@ -132,7 +125,6 @@ if search:
     if df.empty:
         st.warning("No colleges found. Try adjusting your score or category.")
     else:
-        # Summary metrics
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Colleges Found",       len(df))
         m2.metric("Likely in CAP-I",      len(df[df["likely_round"] == "CAP-I"]))
@@ -146,15 +138,14 @@ if search:
             "CAP-II":  "🟡 CAP-II",
             "CAP-III": "🟠 CAP-III",
             "CAP-IV":  "🔴 CAP-IV",
-            "Unlikely":"⚫ Unlikely"
+            "Unlikely": "⚫ Unlikely"
         }
 
         df_display = df.copy()
         df_display["likely_round"] = df_display["likely_round"].map(ROUND_EMOJI)
         for col in ["cap1_cutoff","cap2_cutoff","cap3_cutoff","cap4_cutoff"]:
-            df_display[col] = df_display[col].apply(
-                lambda x: f"{x:.2f}" if pd.notna(x) else "—"
-            )
+            df_display[col] = pd.to_numeric(df_display[col], errors='coerce')
+            df_display[col] = df_display[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
 
         df_display = df_display.rename(columns={
             "institute_name":    "College",
