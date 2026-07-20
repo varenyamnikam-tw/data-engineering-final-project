@@ -3,7 +3,7 @@ import time
 import streamlit as st
 import pandas as pd
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import StatementState
+from databricks.sdk.service.sql import StatementState, TimeoutAction
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -36,7 +36,7 @@ def run_query(sql_text: str) -> pd.DataFrame:
         statement    = sql_text,
         warehouse_id = WAREHOUSE_ID,
         wait_timeout = "50s",
-        on_wait_timeout = "CONTINUE"
+        on_wait_timeout = TimeoutAction.CONTINUE
     )
 
     # Poll until done (warehouse may need time to start)
