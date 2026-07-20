@@ -3,6 +3,7 @@ data/
 
 # ── Python ───────────────────────────────────────────────────────────────────
 .venv/
+requirements-local.txt
 __pycache__/
 *.pyc
 *.pyo
@@ -24,6 +25,10 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+# ── Local agent tool configs (personal, shouldn't be shared) ────────────────
+.claude/
+.copilot/
 
 # Streamlit secrets
 streamlit_app/.streamlit/secrets.toml
