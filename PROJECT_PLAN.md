@@ -272,6 +272,62 @@ disappears after the run.
 **Test on Databricks:** run the full pipeline twice; `dq_metrics` accumulates
 two runs' worth of rows with consistent pass/fail counts.
 
+**Status: ✅ implemented, verified locally end-to-end, needs Databricks
+confirmation.**
+
+Built `dq_checks.ipynb` (13 cells): Input Validation (Silver's 8 null/domain
+checks, persisted with per-column WARN/FAIL thresholds instead of just
+printed), Transformation Checks (Bronze→Silver row-count reconciliation),
+and Output Verification (Gold not-empty, unique at the documented grain
+`institute_code, branch_name, clean_category, seat_gender, is_ews,
+is_tfws`, cutoff columns not all-null). Writes to
+`rankrangers_project_data.dq.dq_metrics` in **append** mode (unlike
+Silver/Gold's `overwrite`), so quality is trackable run-over-run.
+
+Ran the **full chain locally** (Bronze→Silver→Gold→DQ, chained in one
+SparkSession against the real local CSV data) for the first time. All 12
+rules logged, all `PASS`:
+
+| layer | rule | checked | failed | pct | status |
+|---|---|---|---|---|---|
+| silver | not_null.mhtcet_score | 633,641 | 0 | 0.0% | PASS |
+| silver | not_null.seat_type | 633,641 | 26,368 | 4.16% | PASS (WARN threshold 5%) |
+| silver | not_null.seat_gender | 633,641 | 0 | 0.0% | PASS |
+| silver | not_null.seat_pool | 633,641 | 0 | 0.0% | PASS |
+| silver | not_null.clean_category | 633,641 | 0 | 0.0% | PASS |
+| silver | not_null.institute_name | 633,641 | 0 | 0.0% | PASS |
+| silver | not_null.branch_name | 633,641 | 8,986 | 1.42% | PASS (WARN threshold 2%) |
+| silver | not_null.cap_round_num | 633,641 | 0 | 0.0% | PASS |
+| bronze_to_silver | row_count_reconciliation | 735,136 | 101,495 | 13.81% | PASS (WARN 16%) |
+| gold | not_empty | 1 | 0 | 0.0% | PASS |
+| gold | unique_grain | 30,630 | 0 | 0.0% | PASS |
+| gold | not_all_cutoffs_null | 30,630 | 0 | 0.0% | PASS |
+
+`seat_type` (4.16%) is intentionally `PASS` not `WARN` here — its threshold
+is calibrated to the *known, tracked baseline* discovered in Phase 2, so it
+only trips `WARN`/`FAIL` if the gap gets meaningfully worse, not for simply
+existing. The root cause (parser regex gap vs. genuinely absent in source
+PDFs) is still unresolved — tracked as a first-class rule with its baseline
+recorded in `notes`, flagged to the team, not silently accepted or hard-failed.
+
+**New finding while testing this phase — real bug in
+`silver_to_gold_v2.ipynb` Cell 12, not caused by this work:** the metadata
+dropdown builder (`app_metadata.json` for the Streamlit app) does
+`sorted([r[0] for r in df_g.select('branch_name').distinct().collect()])`.
+Gold's `branch_name` inherits Silver's 8,986 null rows (the 3 excluded
+women's colleges) as their own group after `groupBy`, and Python 3's
+`sorted()` cannot compare `None` to `str` — so this cell throws
+`TypeError: '<' not supported between instances of 'NoneType' and 'str'`
+whenever it's run against real data (confirmed locally: 105 Gold rows have
+a null `branch_name`). This is in a notebook we don't otherwise touch in
+Phase 3, so it wasn't fixed here — routed around only in the local test
+harness by filtering `None` before `sorted()`. **Needs a decision:** either
+fix Cell 12 to filter nulls before `sorted()` (one-line change,
+`if r[0] is not None`), or confirm whether it already failed silently on
+Databricks and `app_metadata.json` was produced some other way. Flagging
+for the team / a small separate fix, since editing a teammate's actively-used
+notebook again in this PR risks conflating concerns.
+
 ---
 
 ## Phase 4 — Security & Privacy (UC column masking)
