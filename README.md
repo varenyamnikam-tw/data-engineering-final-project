@@ -1,4 +1,4 @@
-# MH-CET 2025 Merit Predictor
+# MH-CET 2026 Merit Predictor
 
 A data engineering project that ingests Maharashtra CET 2025 branch-wise allotment PDFs, transforms them through a medallion architecture on Databricks, and serves a public-facing college predictor web app.
 
