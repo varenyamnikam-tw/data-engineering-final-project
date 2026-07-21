@@ -109,7 +109,7 @@ DE-CET/
 │   ├── requirements.txt          # Python dependencies
 │   └── .streamlit/
 │       └── config.toml           # Theme config (secrets.toml is gitignored)
-├── SETUP.md                      # Local/Colab/Kaggle/Databricks setup guide
+├── SETUP.md                      # Local/Colab/Kaggle setup guide (Databricks setup is now in this README, §9)
 ├── .gitignore
 └── README.md                     ← this file
 ```
