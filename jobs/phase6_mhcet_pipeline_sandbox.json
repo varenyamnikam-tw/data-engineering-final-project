@@ -1,0 +1,70 @@
+{
+  "email_notifications": {},
+  "format": "MULTI_TASK",
+  "max_concurrent_runs": 1,
+  "name": "phase6_mhcet_pipeline",
+  "tasks": [
+    {
+      "disabled": false,
+      "email_notifications": {},
+      "existing_cluster_id": "0713-165757-6izemia7",
+      "notebook_task": {
+        "notebook_path": "/Users/sajal.rajabhoj@thoughtworks.com/phase5_cli_test_scratch/bronze_streaming_ingest",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "bronze_streaming_ingest",
+      "timeout_seconds": 0
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "bronze_streaming_ingest"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "notebook_task": {
+        "notebook_path": "/Users/sajal.rajabhoj@thoughtworks.com/phase3_cli_test_scratch/bronze_to_silver_v2",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "bronze_to_silver_v2",
+      "timeout_seconds": 0
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "bronze_to_silver_v2"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "notebook_task": {
+        "notebook_path": "/Users/sajal.rajabhoj@thoughtworks.com/phase3_cli_test_scratch/silver_to_gold_v2",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "silver_to_gold_v2",
+      "timeout_seconds": 0
+    },
+    {
+      "depends_on": [
+        {
+          "task_key": "silver_to_gold_v2"
+        }
+      ],
+      "disabled": false,
+      "email_notifications": {},
+      "notebook_task": {
+        "notebook_path": "/Users/sajal.rajabhoj@thoughtworks.com/phase3_cli_test_scratch/dq_checks",
+        "source": "WORKSPACE"
+      },
+      "run_if": "ALL_SUCCESS",
+      "task_key": "dq_checks",
+      "timeout_seconds": 0
+    }
+  ],
+  "timeout_seconds": 0,
+  "webhook_notifications": {}
+}
