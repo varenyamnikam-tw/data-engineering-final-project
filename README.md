@@ -14,8 +14,11 @@ A data engineering project that ingests Maharashtra CET 2025 branch-wise allotme
 4. [Data Source](#4-data-source)
 5. [Pipeline Internals](#5-pipeline-internals)
    - [Bronze — PDF to CSV](#51-bronze--pdf-to-csv)
-   - [Silver — Clean & Standardise](#52-silver--clean--standardise)
-   - [Gold — Cutoff Aggregation](#53-gold--cutoff-aggregation)
+   - [Bronze — CSV to Delta Table](#52-bronze--csv-to-delta-table)
+   - [Silver — Clean & Standardise](#53-silver--clean--standardise)
+   - [Gold — Cutoff Aggregation](#54-gold--cutoff-aggregation)
+   - [Data Quality Checks](#55-data-quality-checks)
+   - [Security & Privacy — Column Masking](#56-security--privacy--column-masking)
 6. [Data Dictionary](#6-data-dictionary)
    - [Bronze CSVs](#61-bronze-csvs)
    - [Silver Delta Table](#62-silver-delta-table--silverrankrangers_project_datamhcet_allotments)
@@ -24,8 +27,9 @@ A data engineering project that ingests Maharashtra CET 2025 branch-wise allotme
 8. [Web App](#8-web-app)
 9. [Databricks Setup](#9-databricks-setup)
 10. [Running the Pipeline End-to-End](#10-running-the-pipeline-end-to-end)
-11. [Known Limitations](#11-known-limitations)
-12. [Team & Access](#12-team--access)
+11. [Orchestration (Databricks Jobs)](#11-orchestration-databricks-jobs)
+12. [Known Limitations](#12-known-limitations)
+13. [Team & Access](#13-team--access)
 
 ---
 
@@ -55,19 +59,30 @@ Every year thousands of MH-CET students struggle to predict which colleges they 
                             │ downloaded manually
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  BRONZE LAYER — Unity Catalog Volume                                     │
+│  BRONZE LAYER (A) — PDF to CSV, Unity Catalog Volume                     │
 │  /Volumes/rankrangers_project_data/pdf/cet_raw_pdfs/data/               │
 │  ├── mahacet_cutoffs_2025/        ← raw PDFs (652 MB, 1480 files)       │
 │  └── mahacet_cutoffs_2025_csv/    ← parsed CSVs (1 per PDF)             │
 │      Notebook: pdf_to_csv.ipynb                                          │
 └───────────────────────────┬─────────────────────────────────────────────┘
-                            │ spark.read.csv
+                            │ Auto Loader (bronze_streaming_ingest.ipynb)
+                            │ or full-overwrite batch (bronze_delta_ingest.ipynb)
+                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  BRONZE LAYER (B) — CSV to Delta Table                                   │
+│  rankrangers_project_data.bronze.mhcet_allotments_raw                   │
+│  735,136 rows / 1,480 files, with provenance columns                    │
+│  Notebook: bronze_streaming_ingest.ipynb (or bronze_delta_ingest.ipynb)  │
+└───────────────────────────┬─────────────────────────────────────────────┘
+                            │ spark.table(bronze.*_raw)
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  SILVER LAYER — Delta Table                                              │
 │  rankrangers_project_data.silver.mhcet_allotments                       │
 │  ~633K clean candidate rows                                              │
 │  Notebook: bronze_to_silver_v2.ipynb                                     │
+│  PII columns (candidate_name/application_id/gender) masked for          │
+│  non-admins — security_masking.ipynb, one-time setup                    │
 └───────────────────────────┬─────────────────────────────────────────────┘
                             │ Spark aggregation
                             ▼
@@ -77,6 +92,12 @@ Every year thousands of MH-CET students struggle to predict which colleges they 
 │  rankrangers_project_data.gold.mhcet_cutoffs_by_pool  ← pool-level      │
 │  Notebook: silver_to_gold_v2.ipynb                                       │
 └───────────────────────────┬─────────────────────────────────────────────┘
+                            │ dq_checks.ipynb (Bronze/Silver/Gold validation)
+                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DQ LAYER — Delta Table                                                  │
+│  rankrangers_project_data.dq.dq_metrics (append, one row per run/rule)  │
+└───────────────────────────┬─────────────────────────────────────────────┘
                             │ Databricks SDK Statement Execution API
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -85,6 +106,10 @@ Every year thousands of MH-CET students struggle to predict which colleges they 
 │  streamlit_app/app.py                                                    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+See [§11 Orchestration](#11-orchestration-databricks-jobs) for how
+Bronze→Silver→Gold→DQ is wired into a Databricks Job, and
+`PIPELINE_ORDER.md` for the full run-order rationale.
 
 **Infrastructure:**
 - **Cloud:** AWS (Databricks on AWS)
@@ -101,18 +126,33 @@ Every year thousands of MH-CET students struggle to predict which colleges they 
 ```
 DE-CET/
 ├── pdf_to_csv.ipynb              # Bronze: PDF → CSV parser
+├── bronze_delta_ingest.ipynb     # Bronze: CSV → Delta table (full overwrite)
+├── bronze_streaming_ingest.ipynb # Bronze: CSV → Delta table (Auto Loader, incremental)
 ├── bronze_to_silver_v2.ipynb     # Silver: clean + standardise
 ├── silver_to_gold_v2.ipynb       # Gold: cutoff aggregation
+├── dq_checks.ipynb               # DQ: input/transformation/output checks -> dq.dq_metrics
+├── security_masking.ipynb        # One-time: UC column mask on Silver PII columns
+├── jobs/                         # Databricks Job definitions (exported via CLI)
+│   ├── phase6_mhcet_pipeline_sandbox.json
+│   └── phase6_mhcet_pipeline_production.json
 ├── streamlit_app/
 │   ├── app.py                    # Streamlit web app
 │   ├── app.yaml                  # Databricks Apps deployment config
 │   ├── requirements.txt          # Python dependencies
 │   └── .streamlit/
 │       └── config.toml           # Theme config (secrets.toml is gitignored)
+├── PIPELINE_ORDER.md              # Run-order rationale: recurring chain vs. one-time steps
 ├── SETUP.md                      # Local/Colab/Kaggle setup guide (Databricks setup is now in this README, §9)
 ├── .gitignore
 └── README.md                     ← this file
 ```
+
+**Two Bronze ingest notebooks exist by design, not as leftover duplication:**
+`bronze_delta_ingest.ipynb` does a full `overwrite` every run (simple, but
+re-reads everything). `bronze_streaming_ingest.ipynb` replaces it with Auto
+Loader — a checkpoint tracks which files were already ingested, so it
+`append`s only newly-discovered files and is a near-zero-cost no-op when
+nothing's changed. The Job definitions in `jobs/` use the streaming version.
 
 > **Note:** `data/` (652 MB of PDFs) and `.venv/` are gitignored. PDFs live in the Databricks Unity Catalog Volume.
 
@@ -197,10 +237,30 @@ These are stored in the `seat_marker` column.
 
 ---
 
-### 5.2 Silver — Clean & Standardise
+### 5.2 Bronze — CSV to Delta Table
+
+**Notebooks:** `bronze_delta_ingest.ipynb` (full overwrite) or
+`bronze_streaming_ingest.ipynb` (Auto Loader, incremental)  
+**Input:** 1,480 CSVs (`pdf_to_csv.ipynb` output)  
+**Output:** `rankrangers_project_data.bronze.mhcet_allotments_raw` (735,136 rows)
+
+Formalizes Bronze as a real Delta table instead of Silver reading the raw
+CSV glob fresh every run — gives a single frozen, schema-enforced,
+versioned artifact between the parser and Silver, plus provenance columns
+(`_source_file`, `_ingest_ts`, `_batch_id`).
+
+`bronze_streaming_ingest.ipynb` is the preferred version for scheduled runs
+(used in the Job — see [§11](#11-orchestration-databricks-jobs)): Auto
+Loader's checkpoint means re-running when no new files exist costs almost
+nothing (`new_rows == new_files == 0`), instead of re-reading and
+re-writing all 735K rows like the full-overwrite version does.
+
+---
+
+### 5.3 Silver — Clean & Standardise
 
 **Notebook:** `bronze_to_silver_v2.ipynb`  
-**Input:** 1,480 CSVs via `spark.read.csv(.../**/*.csv)`  
+**Input:** `bronze.mhcet_allotments_raw` Delta table  
 **Output:** `rankrangers_project_data.silver.mhcet_allotments` (~633K rows)
 
 #### What was wrong with the raw data
@@ -245,7 +305,7 @@ This was discovered by scanning all 735K raw rows before writing any transformat
 
 ---
 
-### 5.3 Gold — Cutoff Aggregation
+### 5.4 Gold — Cutoff Aggregation
 
 **Notebook:** `silver_to_gold_v2.ipynb`  
 **Input:** `silver.mhcet_allotments`  
@@ -284,6 +344,48 @@ else: → "Unlikely"
 #### Excluded pools
 
 `AllIndia`, `Minority`, `Orphan` are excluded from the main Gold table — these require different eligibility (JEE score, specific community membership) that the app doesn't handle.
+
+---
+
+### 5.5 Data Quality Checks
+
+**Notebook:** `dq_checks.ipynb`  
+**Input:** Bronze, Silver, Gold tables  
+**Output:** `rankrangers_project_data.dq.dq_metrics` (append — one row per `run_id` + `rule_name`, trackable run-over-run)
+
+Three pillars:
+1. **Input Validation** — null/domain checks on Silver's key columns (same
+   rules as Silver's own Cell 8, now persisted instead of just printed).
+2. **Transformation Checks** — Bronze→Silver row-count reconciliation
+   (flags if more data is silently dropped than the ~13.8% baseline).
+3. **Output Verification** — Gold isn't empty, has no duplicate rows at its
+   documented grain, and cutoff columns aren't universally null.
+
+Each rule gets a `PASS`/`WARN`/`FAIL` status against a threshold — known,
+already-documented gaps (e.g. the 3 excluded women's colleges, §12) are
+tuned to `WARN`, not `FAIL`, so the checks flag genuine regressions rather
+than re-flagging accepted limitations every run.
+
+Run this after `bronze_delta_ingest.ipynb`/`bronze_streaming_ingest.ipynb`
+→ `bronze_to_silver_v2.ipynb` → `silver_to_gold_v2.ipynb`.
+
+---
+
+### 5.6 Security & Privacy — Column Masking
+
+**Notebook:** `security_masking.ipynb` (one-time setup, not part of the recurring chain)  
+**Target:** `rankrangers_project_data.silver.mhcet_allotments`
+
+Attaches a Unity Catalog mask function to `candidate_name`,
+`application_id`, and `gender` — non-`admins` group members see `***`,
+admins see the real value. Gold is pre-aggregated and never selects these
+columns, so it's PII-free by construction and unaffected.
+
+The mask is stored as Unity Catalog table metadata (not tied to the Delta
+write), so it survives table rewrites and does **not** need to re-run every
+pipeline execution — see `PIPELINE_ORDER.md` for when it does need
+re-running (table dropped/recreated from scratch, or re-pointed at a new
+catalog).
 
 ---
 
@@ -511,7 +613,7 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 | Host | `dbc-ba3cda01-8312.cloud.databricks.com` |
 | Workspace ID | `2464733314746848` |
 | Cloud | AWS |
-| Cluster ID | `0426-134721-vfee0nbj` |
+| Cluster ID | `0713-165757-6izemia7` (Single User mode — see §11 for why Silver/Gold/DQ tasks in the Job use serverless instead) |
 | SQL Warehouse ID | `11ce2a291fc6dc25` |
 
 ### Unity Catalog paths
@@ -528,11 +630,20 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 ### Databricks notebooks (in workspace)
 
 ```
-/Users/varenyam.nikam@thoughtworks.com/data-engineering-final-project/
+/Users/sajal.rajabhoj@thoughtworks.com/data-engineering-final-project/
 ├── pdf_to_csv
+├── bronze_delta_ingest
+├── bronze_streaming_ingest
 ├── bronze_to_silver_v2
-└── silver_to_gold_v2
+├── silver_to_gold_v2
+├── dq_checks
+└── security_masking
 ```
+
+> Also mirrored in `/Users/varenyam.nikam@thoughtworks.com/...` and various
+> `phaseN_cli_test_scratch/` folders used during development — the path
+> above is the canonical, up-to-date copy the Job definitions in `jobs/`
+> point at.
 
 ---
 
@@ -555,7 +666,20 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 
 **Expected output:** 1,480 CSVs across 4 CAP round folders.
 
-### Step 2 — Bronze to Silver (`bronze_to_silver_v2.ipynb`)
+### Step 2 — CSVs to Bronze Delta Table
+
+Use **either** notebook (see [§5.2](#52-bronze--csv-to-delta-table) for
+when to prefer which):
+
+- `bronze_delta_ingest.ipynb` — full overwrite, simplest for a one-off run.
+- `bronze_streaming_ingest.ipynb` — Auto Loader, incremental; the one used
+  in the Job. First run ingests everything (expect 735,136 rows / 1,480
+  files, checked by Cell 4); re-running with no new source files is a
+  near-zero-cost no-op (`new_rows == new_files == 0`, checked by Cell 3).
+
+**Expected output:** `bronze.mhcet_allotments_raw` with 735,136 rows.
+
+### Step 3 — Bronze to Silver (`bronze_to_silver_v2.ipynb`)
 
 1. Run all cells in order
 2. Watch **Cell 4** — `Rows still missing seat_type` should be 0
@@ -564,7 +688,7 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 
 **Expected output:** ~633K rows in `silver.mhcet_allotments`
 
-### Step 3 — Silver to Gold (`silver_to_gold_v2.ipynb`)
+### Step 4 — Silver to Gold (`silver_to_gold_v2.ipynb`)
 
 1. Run all cells in order
 2. **Cell 3** builds the main cutoff table
@@ -574,7 +698,12 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 
 **Expected output:** Gold tables with ~X rows (unique college+branch+category+gender combos)
 
-### Step 4 — Deploy App
+### Step 5 — Data Quality Checks (`dq_checks.ipynb`)
+
+1. Run all cells in order — appends one row per rule to `dq.dq_metrics`
+2. Check the printed summary for any `FAIL` status before trusting Gold/the app
+
+### Step 6 — Deploy App
 
 1. Push code to GitHub (`main` and `master` branches)
 2. In Databricks Apps → Redeploy (or Create new app pointing to repo)
@@ -583,7 +712,42 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 
 ---
 
-## 11. Known Limitations
+## 11. Orchestration (Databricks Jobs)
+
+The recurring chain — everything after the manual PDF download —
+is wired into a 4-task Databricks Job with `depends_on` chaining:
+
+```
+bronze_streaming_ingest -> bronze_to_silver_v2 -> silver_to_gold_v2 -> dq_checks
+```
+
+Job definitions (exported via `databricks jobs get`) live in `jobs/`:
+- `jobs/phase6_mhcet_pipeline_sandbox.json` — points at the `sandbox` catalog copies, used to validate the DAG before touching production.
+- `jobs/phase6_mhcet_pipeline_production.json` — points at the `rankrangers_project_data` catalog notebooks under `/Users/sajal.rajabhoj@thoughtworks.com/data-engineering-final-project/`.
+
+**Compute split within the Job:** `bronze_streaming_ingest` runs on the
+existing cluster (`existing_cluster_id`); `bronze_to_silver_v2`,
+`silver_to_gold_v2`, and `dq_checks` run on **serverless** compute. Reason:
+Silver has a Unity Catalog column mask (`security_masking.ipynb`), and row
+filters/column masks are not enforced on assigned/Single User clusters —
+Databricks blocks (rather than silently bypasses) the query with
+`ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS` if you try.
+Serverless supports masked-table queries; the existing cluster does not.
+
+**`pdf_to_csv.ipynb` is deliberately excluded from the Job** — it has no
+checkpoint (re-parses everything every run for zero benefit on this static
+dataset) and its input (manually downloaded PDFs) isn't something a Job
+can refresh. It's a manual bootstrap step run once, outside the Job. See
+`PIPELINE_ORDER.md` and `HANDOFF_PHASE5_6.md` for the full reasoning.
+
+**Recreating/updating a Job from its JSON:**
+```bash
+databricks jobs reset --json '{"job_id": <id>, "new_settings": <contents of the jobs/*.json file, minus the top-level "settings" wrapper>}'
+```
+
+---
+
+## 12. Known Limitations
 
 | Limitation | Detail |
 |---|---|
@@ -593,20 +757,19 @@ GRANT SELECT ON TABLE rankrangers_project_data.gold.mhcet_cutoffs TO `<client_id
 | 2025 data only | No historical years for trend analysis |
 | AI/Minority seats excluded | Different eligibility criteria (JEE score, community membership) |
 | SQL Warehouse cold start | First query after inactivity takes ~2–3 mins to start warehouse |
-| Static data | No automated pipeline to refresh when new rounds open |
+| PDF ingestion is manual | New CAP-round PDFs must be downloaded and dropped into the Volume by hand — everything from Bronze onward is scheduled/orchestrated (§11), but there's no automated fetch from the MahaCET portal itself |
+| ~4.16% of Silver rows have null `seat_type` | Found by `dq_checks.ipynb`, not previously documented — likely a parser gap for some seat-type suffix pattern; root cause not yet identified |
 
 ---
 
-## 12. Team & Access
+## 13. Team & Access
 
 | Person | Role | Databricks Email |
 |---|---|---|
 | Varenyam Nikam | Data Engineer (owner) | varenyam.nikam@thoughtworks.com |
 | Sajal Rajabhoj | Team member | sajal.rajabhoj@thoughtworks.com |
-| Pragash Rajarathnam | Team member | pragash.rajarathnam@thoughtworks.com |
-| Bhumika Sriram | Team member | bhumika.sriram@thoughtworks.com |
-| Leesei Siow | Team member | leesei.siow@thoughtworks.com |
-| Logeshvar L | Team member | logeshvar.l@thoughtworks.com |
+| Devesh Mankar | Team member | Devesh.mankar@thoughtworks.com |
+| Abhishek Sridhar | Team member | abhishek.sridhar@thoughtworks.com |
 
 ### Sharing CSV data with teammates
 
